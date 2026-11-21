@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VR Clay — sculpt a ball of clay</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='17' r='11' fill='%23c98a63'/><circle cx='12' cy='13' r='3.5' fill='%23e0a884'/></svg>">
+<style>
+  :root {
+    --bg: #0f1116;
+    --panel: #171a20e6;
+    --edge: #2b303a;
+    --text: #e9e6e1;
+    --muted: #8b93a1;
+    --accent: #e07a5f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif;
+  }
+  canvas { display: block; touch-action: none; }
+
+  #hud {
+    position: fixed; inset: 0 0 auto auto; height: 100%;
+    width: 312px; padding: 14px;
+    display: flex; flex-direction: column; gap: 12px;
+    pointer-events: none;
+  }
+  #hud > * { pointer-events: auto; }
+
+  header {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 14px;
+    padding: 12px 14px; backdrop-filter: blur(12px);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .06em; }
+  header p { margin: 2px 0 0; font-size: 11px; color: var(--muted); }
+
+  #vr-button {
+    background: var(--accent); color: #1b1006; border: 0; border-radius: 9px;
+    padding: 9px 14px; font: inherit; font-weight: 650; cursor: pointer; white-space: nowrap;
+  }
+  #vr-button:disabled { background: #2a2f39; color: var(--muted); cursor: default; }
+
+  #ui {
+    flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 14px;
+    padding: 14px; backdrop-filter: blur(12px);
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  #ui::-webkit-scrollbar { width: 8px; }
+  #ui::-webkit-scrollbar-thumb { background: #2f3543; border-radius: 4px; }
+
+  section { display: flex; flex-direction: column; gap: 8px; }
+  h2 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin: 0;
+  }
+  .grid { display: grid; gap: 6px; }
+
+  button {
+    background: #232833; color: var(--text); border: 1px solid transparent;
+    border-radius: 9px; padding: 9px 8px; font: inherit; font-size: 13px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px;
+    transition: background .12s, color .12s;
+  }
+  button:hover { background: #2f3543; }
+  button.active { background: var(--accent); color: #1b1006; font-weight: 650; }
+  button i { width: 10px; height: 10px; border-radius: 3px; display: block; flex: none; }
+
+  .slider { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; font-size: 12px; }
+  .slider span { color: var(--muted); }
+  .slider em { font-style: normal; color: var(--text); }
+  .slider input { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+
+  .swatches { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+  .swatch { height: 26px; padding: 0; border-radius: 7px; border: 2px solid transparent; }
+  .swatch.active { border-color: var(--text); }
+  .picker {
+    width: 100%; height: 30px; padding: 0; border: 1px solid var(--edge);
+    border-radius: 8px; background: #232833; cursor: pointer;
+  }
+
+  /* Export lives outside the scrolling panel so it is always on screen. */
+  #export-bar {
+    flex: none;
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 14px;
+    padding: 12px 14px; backdrop-filter: blur(12px);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  #export-bar h2 { margin: 0; }
+  .export-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; }
+  select {
+    background: #232833; color: var(--text); border: 1px solid var(--edge);
+    border-radius: 9px; padding: 9px 8px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: #1b1006; font-weight: 650; padding: 9px 18px; }
+  button.primary:hover { filter: brightness(1.08); }
+
+  .hint { margin: 0; font-size: 11.5px; color: var(--muted); }
+  .status { margin: 0; font-size: 12px; color: var(--accent); min-height: 18px; }
+
+  #vr-slot { display: flex; gap: 8px; }
+
+  #library {
+    position: fixed; inset: 0; z-index: 15; display: none;
+    background: #0b0d11cc; backdrop-filter: blur(3px);
+    align-items: center; justify-content: center; padding: 24px;
+  }
+  #library.open { display: flex; }
+  #library .sheet {
+    width: min(560px, 100%); max-height: 80vh; overflow-y: auto;
+    background: #171a20; border: 1px solid var(--edge); border-radius: 16px;
+    padding: 18px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .sheet-head { display: flex; align-items: center; justify-content: space-between; }
+  .sheet-head h2 { font-size: 15px; letter-spacing: .06em; }
+  .sheet code { color: var(--accent); }
+  .save-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; }
+  .save-row input {
+    background: #232833; border: 1px solid var(--edge); border-radius: 9px;
+    color: var(--text); font: inherit; padding: 9px 10px;
+  }
+  #library-list { display: flex; flex-direction: column; gap: 6px; }
+  .library-item {
+    display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center;
+    background: #1d222b; border: 1px solid transparent; border-radius: 10px; padding: 9px 10px;
+  }
+  .library-item.current { border-color: var(--accent); }
+  .library-item strong { display: block; font-size: 13.5px; font-weight: 600; }
+  .library-item span { font-size: 11.5px; color: var(--muted); }
+  .library-item button { padding: 7px 12px; font-size: 12.5px; }
+  button.danger:hover { background: #6d2b2b; }
+
+  #help {
+    position: fixed; left: 14px; bottom: 14px; max-width: 360px;
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 14px;
+    padding: 12px 14px; backdrop-filter: blur(12px); font-size: 12px; color: var(--muted);
+  }
+  #help b { color: var(--text); font-weight: 600; }
+  #help div + div { margin-top: 4px; }
+  #help summary { color: var(--text); cursor: pointer; font-weight: 600; font-size: 12.5px; }
+
+  body.in-vr #hud, body.in-vr #help { display: none; }
+
+  #boot, #fatal {
+    position: fixed; inset: 0; display: grid; place-content: center; gap: 8px;
+    text-align: center; background: var(--bg); z-index: 20; padding: 24px;
+  }
+  #fatal { display: none; }
+  #fatal code {
+    display: block; margin-top: 10px; color: var(--accent);
+    font-size: 12px; max-width: 70ch; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+
+<div id="boot">
+  <h1>VR Clay</h1>
+  <p style="color:#8b93a1">Warming the kiln…</p>
+</div>
+
+<div id="fatal">
+  <h1>Couldn't start</h1>
+  <p style="color:#8b93a1">Three.js failed to load. Run <b>python serve.py --vendor</b> once while online to keep a local copy.</p>
+  <code id="fatal-msg"></code>
+</div>
+
+<div id="hud">
+  <header>
+    <div>
+      <h1>VR CLAY</h1>
+      <p>Sculpt a ball of clay</p>
+    </div>
+    <div id="vr-slot"></div>
+  </header>
+  <div id="ui"></div>
+  <div id="export-bar"></div>
+</div>
+
+<div id="library">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h2>Library</h2>
+      <button id="library-close" aria-label="Close">Close</button>
+    </div>
+    <p class="hint">Saved on the computer running <b>serve.py</b>, in <code>library/</code>.
+      Anything here opens from the headset too.</p>
+    <div class="save-row">
+      <input id="library-name" type="text" placeholder="Name this sculpt" maxlength="60">
+      <button id="library-save" class="primary">Save</button>
+      <button id="library-save-new">Save a copy</button>
+    </div>
+    <p id="library-offline" class="hint" hidden>This copy is served as a static
+      site, so there is no library to save into. Run <b>python serve.py</b> and
+      open the app from there to save sculpts and reopen them later. Export
+      still works — it downloads straight to this device.</p>
+    <div id="library-list"></div>
+    <p id="library-empty" class="hint">Nothing saved yet.</p>
+  </div>
+</div>
+
+<div id="help">
+  <details>
+    <summary>Controls</summary>
+    <div style="margin-top:8px"><b>In VR</b> — reach to the tray on your right and <b>squeeze</b> to pick up
+      a tool; squeeze again to put it back. Trigger sculpts with whatever you're holding. Bare hands smooth
+      with a fingertip and pull clay when you squeeze. Grip away from the tray holds and turns the ball;
+      both grips scale it. Thumbstick resizes the brush · A undoes.</div>
+    <div><b>Hand tracking</b> — pinch to sculpt, same tray.</div>
+    <div><b>Desktop</b> — click a tool on the tray to pick it up, or the bare tray to put it down ·
+      drag on the clay to sculpt · drag off it (or right-drag) to orbit · scroll to zoom ·
+      1–8 pick tools · [ ] resize · X mirrors · space spins · Ctrl+Z undoes.</div>
+  </details>
+</div>
+
+<script>
+  // Opened by double-clicking the file? ES modules can't load over file://,
+  // so say so instead of spinning forever.
+  if (location.protocol === 'file:') {
+    fatal('Opened as a file. Browsers block ES modules on file:// — serve it instead:\n\n'
+      + '    python serve.py\n\n'
+      + 'then open http://localhost:8080');
+  }
+
+  // Nothing booted after 8s? Show what we know rather than a blank screen.
+  setTimeout(() => {
+    if (!document.getElementById('boot')) return;
+    fatal('Timed out loading three.js from ' + (window.__threeSource || 'unknown')
+      + '\nPage origin: ' + location.href
+      + '\n\nIf that is a CDN URL and you are offline, run once while online:'
+      + '\n    python serve.py --vendor');
+  }, 8000);
+
+  // Prefer a vendored three.js so the app works offline; fall back to the CDN.
+  (async () => {
+    if (location.protocol === 'file:') return;
+    const CDN = 'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js';
+    let three = CDN;
+    try {
+      const res = await fetch('./vendor/three.module.js', { method: 'HEAD' });
+      if (res.ok) three = './vendor/three.module.js';
+    } catch (_) { /* offline check failed, try the CDN */ }
+    window.__threeSource = three;
+
+    const map = document.createElement('script');
+    map.type = 'importmap';
+    map.textContent = JSON.stringify({ imports: { three } });
+    document.head.appendChild(map);
+
+    const entry = document.createElement('script');
+    entry.type = 'module';
+    entry.src = './src/main.js';
+    entry.onerror = () => fatal('Could not load ' + three);
+    document.head.appendChild(entry);
+  })();
+
+  function fatal(message) {
+    document.getElementById('boot')?.remove();
+    document.getElementById('fatal').style.display = 'grid';
+    document.getElementById('fatal-msg').textContent = message;
+  }
+  window.addEventListener('error', (e) => {
+    if (document.getElementById('boot')) fatal(e.message || String(e.error));
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    if (document.getElementById('boot')) fatal(String(e.reason));
+  });
+</script>
+</body>
+</html>

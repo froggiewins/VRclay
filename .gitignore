@@ -1,0 +1,15 @@
+# TLS material for local HTTPS — key.pem is a real private key, never publish it
+cert.pem
+key.pem
+
+# Local data: sculpts saved from the app, meshes sent from the headset
+library/
+exports/
+
+# Local editor/session config
+.claude/
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store
