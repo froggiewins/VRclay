@@ -45,6 +45,7 @@ export class Panel {
     this.regions = [];
     this.slots = [];
     this.backend = true;   // is serve.py behind this page?
+    this.peer = '';        // machine a model would be sent to
     this.heldTool = '';
     this.stats = '';
     this.notice = '';
@@ -120,14 +121,17 @@ export class Panel {
 
     // Sculpting in the headset? A download would land in the headset's own
     // storage, so this posts the file to the machine serving the app instead.
-    r.push({ kind: 'label', text: 'SEND TO COMPUTER', x: R, y: 666, w: COLW, h: 18 });
+    r.push({ kind: 'label', text: 'SEND A MODEL', x: R, y: 648, w: COLW, h: 18 });
     EXPORT_FORMATS.forEach((format, i) => {
       r.push({
         kind: 'format', id: format.id, text: format.ext.toUpperCase(),
-        x: R + i * 78, y: 690, w: 73, h: 44,
+        x: R + i * 103, y: 670, w: 97, h: 38,
       });
     });
-    r.push({ kind: 'action', action: 'send', text: 'Send', x: R + 312, y: 690, w: 94, h: 44 });
+    // Which machine it goes to: tap to step through the ones on the network.
+    r.push({ kind: 'peer', x: R, y: 714, w: 276, h: 40 });
+    r.push({ kind: 'action', action: 'send-to-selected', text: 'Send',
+      x: R + 286, y: 714, w: 120, h: 40 });
 
     // Library: save the current sculpt, or reopen one of the three most recent
     // without taking the headset off.
@@ -165,6 +169,13 @@ export class Panel {
   setHeldTool(label) {
     if (this.heldTool === label) return;
     this.heldTool = label;
+    this.dirty = true;
+  }
+
+  /** Name of the machine a model will be sent to. */
+  setPeer(name) {
+    if (this.peer === name) return;
+    this.peer = name;
     this.dirty = true;
   }
 
@@ -256,6 +267,7 @@ export class Panel {
       case 'toggle': set(region.key, !state[region.key]); break;
       case 'material': set('material', region.id); break;
       case 'format': set('exportFormat', region.id); break;
+      case 'peer': this.onAction('cycle-peer'); break;
       case 'slot': {
         const slot = this.slots[region.index];
         if (slot) this.onAction('library-load', slot.id);
@@ -272,8 +284,9 @@ export class Panel {
 
   /** Controls that only work when serve.py is serving the page. */
   _needsBackend(region) {
-    return region.kind === 'slot'
-      || (region.kind === 'action' && (region.action === 'send' || region.action === 'library-save'));
+    return region.kind === 'slot' || region.kind === 'peer'
+      || (region.kind === 'action'
+        && (region.action === 'send-to-selected' || region.action === 'library-save'));
   }
 
   // ------------------------------------------------------------------- draw
@@ -338,6 +351,9 @@ export class Panel {
         case 'format':
           this._button(region, state.exportFormat === region.id, hovered, 15);
           break;
+        case 'peer':
+          this._peerButton(region, hovered);
+          break;
         case 'slot': {
           const slot = this.slots[region.index];
           region.text = slot ? truncate(slot.name || slot.id, 11) : '—';
@@ -360,17 +376,16 @@ export class Panel {
     ctx.textAlign = 'left';
     ctx.fillText('New ball discards the current sculpt', 470, 552);
     ctx.fillText('Trigger sculpts · Grip holds the ball · Stick resizes brush', 470, 578);
-    ctx.fillText('A undoes · B cycles tools', 470, 604);
 
     if (this.notice) {
       ctx.fillStyle = ACCENT;
       ctx.font = '500 17px system-ui, sans-serif';
-      ctx.fillText(this.notice, 470, 628);
+      ctx.fillText(this.notice, 470, 606);
     }
     if (this.stats) {
       ctx.fillStyle = TEXT;
       ctx.font = '500 17px system-ui, sans-serif';
-      ctx.fillText(this.stats, 470, 648);
+      ctx.fillText(this.stats, 470, 628);
     }
 
     if (this.pointer) {
@@ -382,6 +397,30 @@ export class Panel {
       ctx.lineWidth = 2;
       ctx.stroke();
     }
+  }
+
+  /** The machine a model will be sent to; tapping steps to the next one. */
+  _peerButton(region, hovered) {
+    const ctx = this.ctx;
+    const known = !!this.peer;
+    roundRect(ctx, region.x, region.y, region.w, region.h, 10);
+    ctx.fillStyle = hovered && known ? FILL_HOVER : FILL;
+    ctx.fill();
+    if (hovered && known) {
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = MUTED;
+    ctx.font = '500 13px system-ui, sans-serif';
+    ctx.fillText('TO', region.x + 14, region.y + 13);
+    ctx.fillStyle = known ? TEXT : MUTED;
+    ctx.font = '600 19px system-ui, sans-serif';
+    ctx.fillText(truncate(this.peer || 'no machines found', 22),
+      region.x + 14, region.y + 28);
+    ctx.textAlign = 'center';
   }
 
   /** What you're currently holding, and how to change it. */

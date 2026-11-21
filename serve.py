@@ -12,6 +12,7 @@ http://localhost:8080 in the headset browser. See README.md.
 """
 
 import argparse
+import hashlib
 import http.server
 import json
 import os
@@ -20,6 +21,8 @@ import socket
 import socketserver
 import ssl
 import sys
+import threading
+import time
 import urllib.parse
 import urllib.request
 
@@ -33,6 +36,98 @@ LIBRARY_DIR = os.path.join(ROOT, "library")
 # load, overwrite and delete them, which is what makes "sculpt in the headset,
 # carry on at the desk" work.
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# --- finding the other machines on the network ------------------------------
+#
+# A browser can't discover anything on the LAN: there is no mDNS from
+# JavaScript, and a page served over HTTPS isn't allowed to reach private
+# addresses anyway. So the servers find each other instead. Each one shouts a
+# small UDP packet on the local broadcast address every couple of seconds and
+# listens for the others, which is the same idea as Bonjour, just smaller.
+#
+# Sending a model to another machine is then a relay: the browser posts it to
+# the server it is already talking to, and that server forwards it. No
+# cross-origin requests, no certificate prompts for the peer.
+
+DISCOVERY_PORT = 41234
+ANNOUNCE_EVERY = 2.0          # seconds between announcements
+PEER_TTL = 8.0                # drop a peer we have not heard from in this long
+
+PEERS = {}                    # id -> {name, host, port, scheme, seen}
+PEERS_LOCK = threading.Lock()
+SELF = {"id": None, "name": None, "port": 0, "scheme": "http"}
+
+
+def start_discovery(port, scheme, name):
+    """Announce this server and collect the others. Returns False if it can't."""
+    SELF["name"] = name or socket.gethostname()
+    SELF["port"] = port
+    SELF["scheme"] = scheme
+    SELF["id"] = hashlib.sha1(
+        ("%s|%s|%d" % (socket.gethostname(), SELF["name"], port)).encode("utf-8")
+    ).hexdigest()[:12]
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(("", DISCOVERY_PORT))
+    except OSError as err:
+        print("  discovery unavailable (%s)" % err)
+        return False
+
+    def listen():
+        while True:
+            try:
+                data, addr = sock.recvfrom(2048)
+                message = json.loads(data.decode("utf-8"))
+            except (OSError, ValueError, UnicodeDecodeError):
+                continue
+            if message.get("app") != "vrclay" or not message.get("id"):
+                continue
+            with PEERS_LOCK:
+                PEERS[message["id"]] = {
+                    "name": str(message.get("name", "unknown"))[:60],
+                    "host": addr[0],
+                    "port": int(message.get("port", 0)) or 0,
+                    "scheme": "https" if message.get("scheme") == "https" else "http",
+                    "seen": time.time(),
+                }
+
+    def announce():
+        payload = json.dumps({
+            "app": "vrclay",
+            "id": SELF["id"],
+            "name": SELF["name"],
+            "port": port,
+            "scheme": scheme,
+        }).encode("utf-8")
+        while True:
+            for target in ("255.255.255.255", "127.0.0.1"):
+                try:
+                    sock.sendto(payload, (target, DISCOVERY_PORT))
+                except OSError:
+                    pass
+            time.sleep(ANNOUNCE_EVERY)
+
+    for job in (listen, announce):
+        thread = threading.Thread(target=job, daemon=True)
+        thread.start()
+    return True
+
+
+def known_peers():
+    """Everyone heard from recently, this machine first."""
+    now = time.time()
+    with PEERS_LOCK:
+        for peer_id in [k for k, v in PEERS.items() if now - v["seen"] > PEER_TTL]:
+            del PEERS[peer_id]
+        found = [dict(value, id=key) for key, value in PEERS.items()]
+    for peer in found:
+        peer["self"] = peer["id"] == SELF["id"]
+        peer["seen"] = round(now - peer["seen"], 1)
+    found.sort(key=lambda p: (not p["self"], p["name"].lower()))
+    return found
 
 # A sculpt made in the headset can be posted here so the file lands on the PC
 # instead of in the headset's own downloads. Deliberately narrow: only these
@@ -59,7 +154,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
-        if path == "/api/sculpts":
+        if path == "/api/peers":
+            self._send_json({"self": SELF["id"], "peers": known_peers()})
+        elif path == "/api/sculpts":
             self._list_sculpts()
         elif path.startswith("/api/sculpts/"):
             self._read_sculpt(path[len("/api/sculpts/"):])
@@ -187,10 +284,75 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _relay_to_peer(self, rest):
+        """Forward an uploaded model to another VR Clay server on the network.
+
+        The browser can't post to a peer itself — different origin, and from an
+        HTTPS page a private address is blocked outright — so this hands it on.
+        """
+        parts = [p for p in rest.split("/") if p]
+        if len(parts) != 2:
+            self.send_error(400, "Expected /api/send/<peer>/<filename>")
+            return
+        peer_id, raw_name = parts[0], urllib.parse.unquote(parts[1])
+
+        if not SAFE_ID.match(peer_id):
+            self.send_error(400, "Bad peer")
+            return
+        name = os.path.basename(raw_name)
+        if not SAFE_NAME.match(name) or not name.lower().endswith(ALLOWED_EXPORT_EXT):
+            self.send_error(400, "Bad filename")
+            return
+
+        peer = next((p for p in known_peers() if p["id"] == peer_id), None)
+        if peer is None:
+            self.send_error(404, "That machine is no longer on the network")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self.send_error(411, "Length required")
+            return
+        if length <= 0 or length > MAX_UPLOAD_BYTES:
+            self.send_error(413, "Bad length")
+            return
+        body = self.rfile.read(length)
+
+        # Sending to ourselves is just a local write; no round trip needed.
+        if peer["self"]:
+            os.makedirs(EXPORT_DIR, exist_ok=True)
+            target = os.path.join(EXPORT_DIR, name)
+            with open(target, "wb") as handle:
+                handle.write(body)
+            print("  saved", target, file=sys.stderr)
+            self._send_json({"ok": True, "to": peer["name"], "path": target})
+            return
+
+        url = "%s://%s:%d/export/%s" % (
+            peer["scheme"], peer["host"], peer["port"], urllib.parse.quote(name))
+        request = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/octet-stream"})
+        # Peers on a LAN serve HTTPS with their own self-signed certificate.
+        context = ssl._create_unverified_context() if peer["scheme"] == "https" else None
+        try:
+            with urllib.request.urlopen(request, timeout=30, context=context) as response:
+                response.read()
+        except Exception as err:                      # noqa: BLE001 - report any failure
+            self.send_error(502, "Could not reach %s (%s)" % (peer["name"], err))
+            return
+
+        print("  sent", name, "to", peer["name"], file=sys.stderr)
+        self._send_json({"ok": True, "to": peer["name"], "bytes": len(body)})
+
     # -------------------------------------------------------------- exports
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/api/send/"):
+            self._relay_to_peer(path[len("/api/send/"):])
+            return
         if not path.startswith("/export/"):
             self.send_error(404, "Not found")
             return
@@ -282,6 +444,10 @@ def main():
     parser.add_argument("--https", action="store_true", help="serve over TLS with cert.pem / key.pem")
     parser.add_argument("--no-upload", action="store_true",
                         help="refuse sculpt uploads from the headset to ./exports")
+    parser.add_argument("--no-discovery", action="store_true",
+                        help="do not announce this machine to others on the network")
+    parser.add_argument("--name", default=None,
+                        help="how this machine appears in the Send-to list")
     args = parser.parse_args()
 
     if args.vendor:
@@ -290,6 +456,9 @@ def main():
     Handler.allow_upload = not args.no_upload
     scheme = "https" if args.https else "http"
     server = Server((args.host, args.port), Handler)
+    discovering = False
+    if not args.no_discovery:
+        discovering = start_discovery(args.port, scheme, args.name)
 
     if args.https:
         cert = os.path.join(ROOT, "cert.pem")
@@ -313,6 +482,11 @@ def main():
         print("  library  %s  (saved sculpts)" % LIBRARY_DIR)
     else:
         print("  exports  disabled (--no-upload)")
+    if discovering:
+        print("  sharing  as '%s' - other machines can send models here"
+              % SELF["name"])
+    else:
+        print("  sharing  off")
     if not args.https:
         print("\n  Headset over USB:  adb reverse tcp:%d tcp:%d" % (args.port, args.port))
         print("  then open          http://localhost:%d in the headset browser" % args.port)

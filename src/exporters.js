@@ -272,6 +272,33 @@ export function download(blob, filename) {
 }
 
 /**
+ * Machines on the network running VR Clay. The browser can't find them itself —
+ * there is no mDNS from JavaScript, and a page served over HTTPS isn't allowed
+ * to reach private addresses — so the server does the looking and reports back.
+ */
+export async function listPeers() {
+  const response = await fetch('./api/peers', { cache: 'no-store' });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText || 'no server'}`);
+  return response.json();
+}
+
+/**
+ * Sends a finished export to a chosen machine, by way of the server this page
+ * came from — it relays to the peer, so the browser never has to talk to
+ * another origin.
+ */
+export async function sendToPeer(peerId, blob, filename) {
+  const url = `./api/send/${encodeURIComponent(peerId)}/${encodeURIComponent(filename)}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: blob,
+  });
+  if (!response.ok) throw new Error(await describe(response));
+  return response.json();
+}
+
+/**
  * Posts a finished export to the machine running serve.py, which writes it to
  * ./exports. This is the way out of a headset — a browser download there lands
  * in the headset's own storage, not on your computer.

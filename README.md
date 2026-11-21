@@ -190,6 +190,35 @@ degenerate triangles dyntopo leaves behind never reach a file.
 STL is scaled to millimetres because that's what slicers assume — exported in
 the scene's native metres, a 15 cm ball would arrive as a 0.3 mm speck.
 
+### Sending a model to another machine
+
+Press **To PC** and you get a list of the machines on your network running VR
+Clay — yours first, labelled *this machine*. Pick one and the model lands in
+that machine's `exports/` folder. In VR the panel has the same thing: a **TO**
+button that steps through the machines, next to **Send**.
+
+Discovery is done by the servers, not the browser. A page can't find anything on
+a LAN — there's no mDNS from JavaScript, and a page served over HTTPS isn't
+allowed to reach private addresses at all. So each `serve.py` announces itself
+with a small UDP broadcast every two seconds and listens for the others, which
+is Bonjour's idea at a much smaller scale. A machine drops off the list eight
+seconds after it goes quiet.
+
+Sending is a relay for the same reason: the browser posts the model to the
+server it is already talking to, and that server forwards it to the peer. No
+cross-origin request, and no certificate prompt for the other machine.
+
+Both halves are optional:
+
+```bash
+python serve.py --name "Studio PC"   # how this machine appears in the list
+python serve.py --no-discovery       # don't announce, don't look
+python serve.py --no-upload          # refuse incoming models entirely
+```
+
+Relayed files are held to the same rules as a direct upload: the four mesh
+extensions, plain filenames, into `exports/` only, 96 MB cap.
+
 ### Getting a sculpt out of the headset
 
 A browser download inside a headset lands in the *headset's* storage. So the
@@ -310,7 +339,8 @@ material underneath.
 
 ```
 index.html          page shell, import map, desktop styling
-serve.py            static server (+ --vendor, --https, --no-upload)
+serve.py            static server, sculpt library, LAN discovery + relay
+                    (--vendor, --https, --no-upload, --no-discovery, --name)
 exports/            mesh files sent from the headset land here
 library/            saved sculpts (.clay), reopenable from any device
 src/main.js         scene, input wiring, frame loop

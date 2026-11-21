@@ -11,7 +11,7 @@ import {
   savePrefs, loadPrefs,
 } from './state.js';
 import {
-  EXPORT_FORMATS, exportMesh, download, sendToHost, saveLocal, readLocal,
+  EXPORT_FORMATS, exportMesh, download, listPeers, sendToPeer, saveLocal, readLocal,
   timestamp, formatSize,
 } from './exporters.js';
 import {
@@ -260,6 +260,9 @@ function handleAction(action, value) {
     case 'library-refresh':
       refreshLibrary();
       break;
+    case 'cycle-peer':
+      cyclePeer();
+      break;
     case 'load': {
       const data = readLocal();
       if (!data) {
@@ -277,20 +280,22 @@ function handleAction(action, value) {
         + ` ${clay.triangleCount.toLocaleString()} triangles`);
       break;
     }
-    case 'send': {
-      const { blob, filename } = buildExport(value);
-      const size = formatSize(blob.size);
-      ui.setStatus(`Sending ${size}…`);
-      panel.setNotice(`Sending ${size}…`, 60000);
-      sendToHost(blob, filename).then(() => {
-        ui.setStatus(`Sent to your computer: exports/${filename}`);
-        panel.setNotice(`Saved on PC: ${filename}`);
-      }).catch((err) => {
-        ui.setStatus(`Send failed: ${err.message}`);
-        panel.setNotice(`Send failed: ${err.message}`);
+    case 'send':
+      // Ask which machine first — the browser can't see the network, so the
+      // server we're talking to reports who else is out there.
+      ui.setStatus('Looking for machines…');
+      listPeers().then(({ peers }) => {
+        ui.showPeers(peers, (peer) => sendExportTo(peer, value));
+        ui.setStatus(peers.length ? '' : 'No machines found on the network');
+      }).catch(() => {
+        ui.setStatus('Needs the local server — run python serve.py');
+        panel.setNotice('Needs the local server (serve.py)');
       });
       break;
-    }
+    case 'send-to-selected':
+      if (selectedPeer) sendExportTo(selectedPeer, state.exportFormat);
+      else panel.setNotice('No machine selected');
+      break;
     default:
       break;
   }
@@ -381,6 +386,50 @@ async function refreshLibrary() {
   ui.setLibrary(librarySnapshot, current, backendReady);
   panel.setSlots(librarySnapshot.slice(0, 3));
   panel.setBackend(backendReady);
+}
+
+/** Which machine the VR panel will send to. */
+let peerList = [];
+let selectedPeer = null;
+
+async function refreshPeers() {
+  try {
+    const { peers } = await listPeers();
+    peerList = peers;
+    if (!selectedPeer || !peers.some((p) => p.id === selectedPeer.id)) {
+      selectedPeer = peers.find((p) => p.self) || peers[0] || null;
+    }
+  } catch {
+    peerList = [];
+    selectedPeer = null;
+  }
+  panel.setPeer(selectedPeer ? selectedPeer.name : '');
+}
+
+/** Step to the next machine in the list, for choosing one in VR. */
+function cyclePeer() {
+  if (peerList.length === 0) {
+    panel.setNotice('No machines found');
+    return;
+  }
+  const at = peerList.findIndex((p) => selectedPeer && p.id === selectedPeer.id);
+  selectedPeer = peerList[(at + 1) % peerList.length];
+  panel.setPeer(selectedPeer.name);
+  panel.setNotice(`Send to ${selectedPeer.name}`);
+}
+
+function sendExportTo(peer, formatId) {
+  const { blob, filename } = buildExport(formatId);
+  const size = formatSize(blob.size);
+  ui.setStatus(`Sending ${size} to ${peer.name}…`);
+  panel.setNotice(`Sending to ${peer.name}…`, 60000);
+  sendToPeer(peer.id, blob, filename).then((result) => {
+    ui.setStatus(`Sent to ${result.to}: exports/${filename}`);
+    panel.setNotice(`Sent to ${result.to}`);
+  }).catch((err) => {
+    ui.setStatus(`Send to ${peer.name} failed: ${err.message}`);
+    panel.setNotice(`Send failed: ${err.message}`);
+  });
 }
 
 /** Builds the mesh file for the chosen format, tagged with today's material. */
@@ -946,6 +995,9 @@ window.addEventListener('resize', () => {
 document.getElementById('boot')?.remove();
 onLibraryChange(() => { panel.dirty = true; });
 refreshLibrary();
+refreshPeers();
+// Machines come and go, so keep the list current for the in-VR picker.
+setInterval(refreshPeers, 4000);
 
 // Debug handle: poke at the engine from the console, e.g.
 //   vrclay.clay.stroke({ tool:'push', center:new THREE.Vector3(0,0.15,0), radius:0.05, strength:1, dt:0.5 })

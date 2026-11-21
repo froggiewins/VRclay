@@ -222,6 +222,17 @@ export function createDomUI({ onAction }) {
   status.className = 'status';
   root.appendChild(status);
 
+  // --- "send to which machine?" picker
+  const peersOverlay = document.getElementById('peers');
+  const peersList = peersOverlay.querySelector('#peers-list');
+  const peersEmpty = peersOverlay.querySelector('#peers-empty');
+  const closePeers = () => peersOverlay.classList.remove('open');
+  peersOverlay.querySelector('#peers-close').addEventListener('click', closePeers);
+  peersOverlay.addEventListener('click', (e) => { if (e.target === peersOverlay) closePeers(); });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && peersOverlay.classList.contains('open')) closePeers();
+  });
+
   // --- library: a header button and an overlay, so saved work is one click
   //     away instead of buried in the scrolling panel
   const libraryButton = document.createElement('button');
@@ -264,6 +275,32 @@ export function createDomUI({ onAction }) {
       clearTimeout(statusTimer);
       statusTimer = setTimeout(() => { status.textContent = ''; }, 2600);
     },
+    /** Shows the machine list; `onPick` gets the chosen peer. */
+    showPeers(peers, onPick) {
+      peersList.textContent = '';
+      peersEmpty.hidden = peers.length > 0;
+      peersEmpty.textContent = 'No machines found. Is VR Clay running on the other one?';
+
+      for (const peer of peers) {
+        const row = document.createElement('button');
+        row.className = 'peer-item';
+        const dot = document.createElement('i');
+        dot.className = 'dot';
+        const info = document.createElement('div');
+        const title = document.createElement('strong');
+        title.textContent = peer.name;
+        const detail = document.createElement('span');
+        detail.textContent = peer.host + ':' + peer.port;
+        info.append(title, detail);
+        const tag = document.createElement('em');
+        tag.textContent = peer.self ? 'this machine' : '';
+        row.append(dot, info, tag);
+        row.addEventListener('click', () => { closePeers(); onPick(peer); });
+        peersList.appendChild(row);
+      }
+      peersOverlay.classList.add('open');
+    },
+
     setMeshStats(text) {
       if (meshStats.textContent !== text) meshStats.textContent = text;
     },
